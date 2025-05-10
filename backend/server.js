@@ -4,14 +4,14 @@ const helmet = require("helmet")
 const rateLimit = require("express-rate-limit")
 const morgan = require("morgan")
 const config = require("./config/config")
-const errorHandler = require("./middleware/error")
+const errorHandler = require("./middleware/errorMiddleware")
 const logger = require("./utils/logger")
 
 // Import routes
-const authRoutes = require("./routes/auth")
-const studentRoutes = require("./routes/student")
-const teacherRoutes = require("./routes/teacher")
-const managementRoutes = require("./routes/management")
+const authRoutes = require("./routes/authRoute")
+const studentRoutes = require("./routes/studentRoutes")
+const teacherRoutes = require("./routes/teacherRoutes")
+const managementRoutes = require("./routes/managementRoutes")
 
 // Initialize express app
 const app = express()

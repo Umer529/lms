@@ -302,3 +302,118 @@ exports.payFee = async (req, res, next) => {
     next(err)
   }
 }
+
+
+// Enroll in a course
+exports.enrollInCourse = async (req, res, next) => {
+  try {
+    const { courseId } = req.params
+    const studentId = req.user.id
+
+    // Get database connection
+    const pool = await getConnection()
+
+    // Get student ID from user ID
+    const studentResult = await pool
+      .request()
+      .input("userId", sql.Int, studentId)
+      .query(`
+        SELECT student_id
+        FROM Students
+        WHERE user_id = @userId
+      `)
+
+    if (studentResult.recordset.length === 0) {
+      return res.status(404).json({ message: "Student not found" })
+    }
+
+    const student_id = studentResult.recordset[0].student_id
+
+    // Check if course exists
+    const courseCheck = await pool
+      .request()
+      .input("courseId", sql.Int, courseId)
+      .query("SELECT * FROM Courses WHERE course_id = @courseId")
+
+    if (courseCheck.recordset.length === 0) {
+      return res.status(404).json({ message: "Course not found" })
+    }
+
+    // Check if student is already enrolled
+    const enrollmentCheck = await pool
+      .request()
+      .input("studentId", sql.Int, student_id)
+      .input("courseId", sql.Int, courseId)
+      .query("SELECT * FROM Enrollments WHERE student_id = @studentId AND course_id = @courseId")
+
+    if (enrollmentCheck.recordset.length > 0) {
+      return res.status(400).json({ message: "You are already enrolled in this course" })
+    }
+
+    // Enroll student in course
+    await pool
+      .request()
+      .input("studentId", sql.Int, student_id)
+      .input("courseId", sql.Int, courseId)
+      .input("enrollmentStatus", sql.VarChar, "active")
+      .input("createdAt", sql.DateTime, new Date())
+      .query(`
+        INSERT INTO Enrollments (student_id, course_id, enrollment_status, created_at)
+        VALUES (@studentId, @courseId, @enrollmentStatus, @createdAt)
+      `)
+
+    res.status(201).json({
+      message: "Successfully enrolled in course",
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+// Get available courses for enrollment
+exports.getAvailableCourses = async (req, res, next) => {
+  try {
+    const studentId = req.user.id
+
+    // Get database connection
+    const pool = await getConnection()
+
+    // Get student ID from user ID
+    const studentResult = await pool
+      .request()
+      .input("userId", sql.Int, studentId)
+      .query(`
+        SELECT student_id
+        FROM Students
+        WHERE user_id = @userId
+      `)
+
+    if (studentResult.recordset.length === 0) {
+      return res.status(404).json({ message: "Student not found" })
+    }
+
+    const student_id = studentResult.recordset[0].student_id
+
+    // Get courses that student is not enrolled in
+    const result = await pool
+      .request()
+      .input("studentId", sql.Int, student_id)
+      .query(`
+        SELECT c.course_id as id, c.course_code as code, c.course_name as name, 
+               c.schedule, t.name as teacherName
+        FROM Courses c
+        LEFT JOIN Teachers t ON c.teacher_id = t.teacher_id
+        WHERE c.course_id NOT IN (
+          SELECT course_id FROM Enrollments WHERE student_id = @studentId
+        )
+        ORDER BY c.course_code
+      `)
+
+    res.status(200).json({
+      availableCourses: result.recordset,
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+

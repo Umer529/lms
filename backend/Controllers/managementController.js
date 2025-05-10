@@ -573,3 +573,343 @@ exports.deleteCourse = async (req, res, next) => {
     next(err)
   }
 }
+
+
+// Generate reports
+exports.generateReports = async (req, res, next) => {
+  try {
+    const { reportType } = req.params
+
+    // Get database connection
+    const pool = await getConnection()
+
+    let reportData = []
+    let reportTitle = ""
+
+    switch (reportType) {
+      case "enrollment":
+        // Generate enrollment report
+        reportTitle = "Course Enrollment Report"
+        const enrollmentResult = await pool.request().query(`
+          SELECT c.course_id, c.course_code, c.course_name, 
+                 COUNT(e.enrollment_id) as enrolled_students,
+                 t.name as teacher_name
+          FROM Courses c
+          LEFT JOIN Enrollments e ON c.course_id = e.course_id
+          LEFT JOIN Teachers t ON c.teacher_id = t.teacher_id
+          GROUP BY c.course_id, c.course_code, c.course_name, t.name
+          ORDER BY enrolled_students DESC
+        `)
+        reportData = enrollmentResult.recordset
+        break
+
+      case "attendance":
+        // Generate attendance report
+        reportTitle = "Attendance Report"
+        const attendanceResult = await pool.request().query(`
+          SELECT c.course_id, c.course_code, c.course_name,
+                 COUNT(DISTINCT a.student_id) as total_students,
+                 SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) as present_count,
+                 SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) as absent_count,
+                 SUM(CASE WHEN a.status = 'excused' THEN 1 ELSE 0 END) as excused_count,
+                 COUNT(a.attendance_id) as total_records
+          FROM Courses c
+          LEFT JOIN Attendance a ON c.course_id = a.course_id
+          GROUP BY c.course_id, c.course_code, c.course_name
+          ORDER BY c.course_code
+        `)
+        reportData = attendanceResult.recordset
+        break
+
+      case "fees":
+        // Generate fees report
+        reportTitle = "Fee Payment Report"
+        const feesResult = await pool.request().query(`
+          SELECT s.student_id, s.name, s.roll_number,
+                 SUM(f.amount) as total_fees,
+                 SUM(CASE WHEN f.payment_status = 'paid' THEN f.amount ELSE 0 END) as paid_amount,
+                 SUM(CASE WHEN f.payment_status = 'unpaid' THEN f.amount ELSE 0 END) as unpaid_amount,
+                 SUM(CASE WHEN f.payment_status = 'pending' THEN f.amount ELSE 0 END) as pending_amount
+          FROM Students s
+          LEFT JOIN Fees f ON s.student_id = f.student_id
+          GROUP BY s.student_id, s.name, s.roll_number
+          ORDER BY s.name
+        `)
+        reportData = feesResult.recordset
+        break
+
+      case "grades":
+        // Generate grades report
+        reportTitle = "Student Grades Report"
+        const gradesResult = await pool.request().query(`
+          SELECT s.student_id, s.name, s.roll_number,
+                 c.course_id, c.course_code, c.course_name,
+                 AVG(CAST(g.grade as FLOAT)) as average_grade,
+                 MIN(CAST(g.grade as FLOAT)) as min_grade,
+                 MAX(CAST(g.grade as FLOAT)) as max_grade,
+                 COUNT(g.grade_id) as grade_count
+          FROM Students s
+          JOIN Enrollments e ON s.student_id = e.student_id
+          JOIN Courses c ON e.course_id = c.course_id
+          LEFT JOIN Grades g ON s.student_id = g.student_id AND c.course_id = g.course_id
+          GROUP BY s.student_id, s.name, s.roll_number, c.course_id, c.course_code, c.course_name
+          ORDER BY s.name, c.course_code
+        `)
+        reportData = gradesResult.recordset
+        break
+
+      default:
+        return res.status(400).json({ message: "Invalid report type" })
+    }
+
+    res.status(200).json({
+      title: reportTitle,
+      type: reportType,
+      generatedAt: new Date(),
+      data: reportData,
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+// Manage fees
+exports.manageFees = async (req, res, next) => {
+  try {
+    const { action } = req.params
+    const { studentId, amount, description, dueDate, feeId } = req.body
+
+    // Get database connection
+    const pool = await getConnection()
+
+    switch (action) {
+      case "create":
+        // Validate input
+        if (!studentId || !amount) {
+          return res.status(400).json({ message: "Please provide studentId and amount" })
+        }
+
+        // Check if student exists
+        const studentCheck = await pool
+          .request()
+          .input("studentId", sql.Int, studentId)
+          .query("SELECT * FROM Students WHERE student_id = @studentId")
+
+        if (studentCheck.recordset.length === 0) {
+          return res.status(404).json({ message: "Student not found" })
+        }
+
+        // Create fee
+        const createResult = await pool
+          .request()
+          .input("studentId", sql.Int, studentId)
+          .input("amount", sql.Decimal, amount)
+          .input("description", sql.VarChar, description || "Tuition Fee")
+          .input("dueDate", sql.Date, dueDate ? new Date(dueDate) : new Date())
+          .input("paymentStatus", sql.VarChar, "unpaid")
+          .input("createdAt", sql.DateTime, new Date())
+          .query(`
+            INSERT INTO Fees (student_id, amount, description, due_date, payment_status, created_at)
+            OUTPUT INSERTED.fee_id as id, INSERTED.amount, INSERTED.description, INSERTED.due_date, INSERTED.payment_status
+            VALUES (@studentId, @amount, @description, @dueDate, @paymentStatus, @createdAt)
+          `)
+
+        res.status(201).json({
+          message: "Fee created successfully",
+          fee: createResult.recordset[0],
+        })
+        break
+
+      case "update":
+        // Validate input
+        if (!feeId) {
+          return res.status(400).json({ message: "Please provide feeId" })
+        }
+
+        // Check if fee exists
+        const feeCheck = await pool
+          .request()
+          .input("feeId", sql.Int, feeId)
+          .query("SELECT * FROM Fees WHERE fee_id = @feeId")
+
+        if (feeCheck.recordset.length === 0) {
+          return res.status(404).json({ message: "Fee not found" })
+        }
+
+        // Build update query
+        let updateQuery = "UPDATE Fees SET "
+        const updateParams = []
+
+        if (amount) {
+          updateParams.push("amount = @amount")
+        }
+
+        if (description !== undefined) {
+          updateParams.push("description = @description")
+        }
+
+        if (dueDate) {
+          updateParams.push("due_date = @dueDate")
+        }
+
+        updateParams.push("updated_at = @updatedAt")
+
+        if (updateParams.length === 1) {
+          // Only updatedAt
+          return res.status(400).json({ message: "No fields to update" })
+        }
+
+        updateQuery += updateParams.join(", ")
+        updateQuery +=
+          " OUTPUT INSERTED.fee_id as id, INSERTED.amount, INSERTED.description, INSERTED.due_date, INSERTED.payment_status WHERE fee_id = @feeId"
+
+        // Update fee
+        const updateRequest = pool.request().input("feeId", sql.Int, feeId).input("updatedAt", sql.DateTime, new Date())
+
+        if (amount) updateRequest.input("amount", sql.Decimal, amount)
+        if (description !== undefined) updateRequest.input("description", sql.VarChar, description)
+        if (dueDate) updateRequest.input("dueDate", sql.Date, new Date(dueDate))
+
+        const updateResult = await updateRequest.query(updateQuery)
+
+        res.status(200).json({
+          message: "Fee updated successfully",
+          fee: updateResult.recordset[0],
+        })
+        break
+
+      case "delete":
+        // Validate input
+        if (!feeId) {
+          return res.status(400).json({ message: "Please provide feeId" })
+        }
+
+        // Check if fee exists
+        const deleteCheck = await pool
+          .request()
+          .input("feeId", sql.Int, feeId)
+          .query("SELECT * FROM Fees WHERE fee_id = @feeId")
+
+        if (deleteCheck.recordset.length === 0) {
+          return res.status(404).json({ message: "Fee not found" })
+        }
+
+        // Delete fee
+        await pool.request().input("feeId", sql.Int, feeId).query("DELETE FROM Fees WHERE fee_id = @feeId")
+
+        res.status(200).json({
+          message: "Fee deleted successfully",
+        })
+        break
+
+      default:
+        return res.status(400).json({ message: "Invalid action" })
+    }
+  } catch (err) {
+    next(err)
+  }
+}
+
+// Post notice
+exports.postNotice = async (req, res, next) => {
+  try {
+    const { title, content } = req.body
+    const managementId = req.user.id
+
+    // Validate input
+    if (!title || !content) {
+      return res.status(400).json({ message: "Please provide title and content" })
+    }
+
+    // Get database connection
+    const pool = await getConnection()
+
+    // Post notice
+    const result = await pool
+      .request()
+      .input("title", sql.VarChar, title)
+      .input("content", sql.Text, content)
+      .input("postedBy", sql.Int, managementId)
+      .input("createdAt", sql.DateTime, new Date())
+      .query(`
+        INSERT INTO Notices (title, content, posted_by_user_id, created_at)
+        OUTPUT INSERTED.notice_id as id, INSERTED.title, INSERTED.content, INSERTED.created_at
+        VALUES (@title, @content, @postedBy, @createdAt)
+      `)
+
+    res.status(201).json({
+      message: "Notice posted successfully",
+      notice: result.recordset[0],
+    })
+  } catch (err) {
+    next(err)
+  }
+}
+
+// System configuration
+exports.systemConfig = async (req, res, next) => {
+  try {
+    const { configKey, configValue, description } = req.body
+
+    // Validate input
+    if (!configKey || configValue === undefined) {
+      return res.status(400).json({ message: "Please provide configKey and configValue" })
+    }
+
+    // Get database connection
+    const pool = await getConnection()
+
+    // Check if config exists
+    const configCheck = await pool
+      .request()
+      .input("configKey", sql.VarChar, configKey)
+      .query("SELECT * FROM SystemConfig WHERE config_key = @configKey")
+
+    if (configCheck.recordset.length > 0) {
+      // Update existing config
+      await pool
+        .request()
+        .input("configKey", sql.VarChar, configKey)
+        .input("configValue", sql.VarChar, configValue.toString())
+        .input("description", sql.VarChar, description || configCheck.recordset[0].description)
+        .input("updatedAt", sql.DateTime, new Date())
+        .query(`
+          UPDATE SystemConfig
+          SET config_value = @configValue, description = @description, updated_at = @updatedAt
+          WHERE config_key = @configKey
+        `)
+
+      res.status(200).json({
+        message: "System configuration updated successfully",
+        config: {
+          key: configKey,
+          value: configValue,
+          description: description || configCheck.recordset[0].description,
+        },
+      })
+    } else {
+      // Create new config
+      await pool
+        .request()
+        .input("configKey", sql.VarChar, configKey)
+        .input("configValue", sql.VarChar, configValue.toString())
+        .input("description", sql.VarChar, description || "")
+        .input("createdAt", sql.DateTime, new Date())
+        .query(`
+          INSERT INTO SystemConfig (config_key, config_value, description, created_at)
+          VALUES (@configKey, @configValue, @description, @createdAt)
+        `)
+
+      res.status(201).json({
+        message: "System configuration created successfully",
+        config: {
+          key: configKey,
+          value: configValue,
+          description: description || "",
+        },
+      })
+    }
+  } catch (err) {
+    next(err)
+  }
+}

@@ -13,8 +13,8 @@ const {
   manageFees,
   postNotice,
   systemConfig,
-} = require("../controllers/managementController")
-const { protect } = require("../middleware/auth")
+} = require("../Controllers/managementController")
+const { protect } = require("../middleware/authMiddleware")
 const { authorize } = require("../middleware/roleCheck")
 
 // All routes are protected and require management role

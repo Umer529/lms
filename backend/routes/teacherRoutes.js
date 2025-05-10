@@ -14,7 +14,7 @@ const {
   getStudentProgress,
   createQuiz,
 } = require("../Controllers/teacherController")
-const { protect } = require("../middleware/auth")
+const { protect } = require("../middleware/authMiddleware")
 const { authorize } = require("../middleware/roleCheck")
 
 // All routes are protected and require teacher role

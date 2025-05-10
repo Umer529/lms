@@ -11,7 +11,7 @@ const {
   enrollInCourse,
   getAvailableCourses,
 } = require("../Controllers/studentController")
-const { protect } = require("../middleware/auth")
+const { protect } = require("../middleware/authMiddleware")
 const { authorize } = require("../middleware/roleCheck")
 
 // All routes are protected and require student role
